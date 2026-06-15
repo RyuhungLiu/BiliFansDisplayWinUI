@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "BiliFansDisplay (Package)": {
+      "commandName": "MsixPackage"
+    },
+    "BiliFansDisplay (Unpackaged)": {
+      "commandName": "Project"
+    }
+  }
+}

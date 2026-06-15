@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Window
+    x:Class="BiliFansDisplay.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    Title=""
+    mc:Ignorable="d">
+    <Grid
+        x:Name="RootGrid"
+        Background="Transparent"
+        PointerCanceled="RootGrid_PointerReleased"
+        PointerMoved="RootGrid_PointerMoved"
+        PointerPressed="RootGrid_PointerPressed"
+        PointerReleased="RootGrid_PointerReleased">
+        <Grid.ContextFlyout>
+            <MenuFlyout>
+                <MenuFlyoutItem Click="RefreshNow_Click" Text="立刻刷新" />
+                <MenuFlyoutSeparator />
+                <MenuFlyoutSubItem Text="亚克力风格">
+                    <ToggleMenuFlyoutItem
+                        x:Name="AcrylicDefaultItem"
+                        Click="AcrylicDefault_Click"
+                        IsChecked="True"
+                        Text="Default" />
+                    <ToggleMenuFlyoutItem
+                        x:Name="AcrylicBaseItem"
+                        Click="AcrylicBase_Click"
+                        Text="Base" />
+                    <ToggleMenuFlyoutItem
+                        x:Name="AcrylicThinItem"
+                        Click="AcrylicThin_Click"
+                        Text="Thin" />
+                </MenuFlyoutSubItem>
+            </MenuFlyout>
+        </Grid.ContextFlyout>
+
+        <StackPanel
+            x:Name="SetupView"
+            HorizontalAlignment="Center"
+            VerticalAlignment="Center"
+            Spacing="12"
+            Visibility="Collapsed">
+            <TextBox
+                x:Name="UidTextBox"
+                Width="220"
+                Header="B站 UID"
+                InputScope="Number"
+                PlaceholderText="输入 UID" />
+            <Button
+                x:Name="SetupConfirmButton"
+                HorizontalAlignment="Center"
+                Click="SetupConfirm_Click"
+                Content="确定" />
+            <TextBlock
+                x:Name="SetupErrorText"
+                HorizontalAlignment="Center"
+                FontSize="12"
+                Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                Text=""
+                TextWrapping="Wrap" />
+        </StackPanel>
+
+        <StackPanel
+            x:Name="StatsView"
+            HorizontalAlignment="Center"
+            VerticalAlignment="Center"
+            Spacing="6">
+            <TextBlock
+                x:Name="FansText"
+                HorizontalAlignment="Center"
+                FontFamily="Cascadia Mono, Consolas, Courier New"
+                FontSize="64"
+                FontWeight="SemiBold"
+                Foreground="{ThemeResource TextFillColorPrimaryBrush}"
+                Text="--" />
+
+            <StackPanel
+                HorizontalAlignment="Center"
+                Orientation="Horizontal"
+                Spacing="22">
+                <TextBlock
+                    x:Name="OneHourText"
+                    FontFamily="Cascadia Mono, Consolas, Courier New"
+                    FontSize="18"
+                    FontWeight="SemiBold"
+                    Text="1h +0" />
+                <TextBlock
+                    x:Name="ThreeHourText"
+                    FontFamily="Cascadia Mono, Consolas, Courier New"
+                    FontSize="18"
+                    FontWeight="SemiBold"
+                    Text="3h +0" />
+                <TextBlock
+                    x:Name="DayText"
+                    FontFamily="Cascadia Mono, Consolas, Courier New"
+                    FontSize="18"
+                    FontWeight="SemiBold"
+                    Text="24h +0" />
+            </StackPanel>
+        </StackPanel>
+    </Grid>
+</Window>
