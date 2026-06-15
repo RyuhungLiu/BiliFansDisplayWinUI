@@ -39,3 +39,29 @@ dotnet build .\BiliFansDisplay\BiliFansDisplay.csproj -c Release -p:Platform=x64
 ```text
 BiliFansDisplay\bin\x64\Release\net9.0-windows10.0.26100.0\win-x64\BiliFansDisplay.exe
 ```
+
+## 安装和开机自启动
+
+运行安装脚本会构建 Release x64 版本，生成本地 zip 包，安装到当前用户目录，并创建开始菜单和开机自启动快捷方式：
+
+```powershell
+.\scripts\Install-BiliFansDisplay.ps1
+```
+
+生成的本地包位于：
+
+```text
+artifacts\BiliFansDisplay-win-x64.zip
+```
+
+默认安装路径：
+
+```text
+%LOCALAPPDATA%\Programs\BiliFansDisplay
+```
+
+开机自启动使用当前用户 Startup 文件夹：
+
+```text
+%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\BiliFansDisplay.lnk
+```
