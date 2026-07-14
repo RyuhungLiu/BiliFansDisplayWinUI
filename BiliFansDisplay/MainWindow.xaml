@@ -10,7 +10,6 @@
     <Grid
         x:Name="RootGrid"
         Background="Transparent"
-        Loaded="RootGrid_Loaded"
         PointerCanceled="RootGrid_PointerReleased"
         PointerMoved="RootGrid_PointerMoved"
         PointerPressed="RootGrid_PointerPressed"

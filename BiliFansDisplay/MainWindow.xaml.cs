@@ -27,7 +27,6 @@ public sealed partial class MainWindow : Window
 {
     private const int WindowWidth = 460;
     private const int WindowHeight = 240;
-    private const double DefaultDpi = 96d;
     private const string AppDataFolderName = "BiliFansDisplay";
     private const string ConfigFileName = "config.json";
     private const string HistoryFolderName = "history";
@@ -68,20 +67,18 @@ public sealed partial class MainWindow : Window
     private DesktopAcrylicKind _acrylicKind = DesktopAcrylicKind.Default;
     private bool _isDragging;
     private bool _isRefreshing;
-    private double _lastRasterizationScale;
     private long? _uid;
     private string? _historyPath;
     private PointInt32 _dragStartCursor;
     private PointInt32 _dragStartWindow;
     private SystemBackdropConfiguration? _backdropConfiguration;
-    private XamlRoot? _xamlRoot;
 
     public MainWindow()
     {
         InitializeComponent();
 
         SetWindowIcon();
-        ApplyInitialWindowSize();
+        AppWindow.Resize(new SizeInt32(WindowWidth, WindowHeight));
 
         if (AppWindow.Presenter is OverlappedPresenter presenter)
         {
@@ -112,54 +109,6 @@ public sealed partial class MainWindow : Window
         {
             AppWindow.SetIcon(iconPath);
         }
-    }
-
-    private void ApplyInitialWindowSize()
-    {
-        nint hwnd = WindowNative.GetWindowHandle(this);
-        uint dpi = GetDpiForWindow(hwnd);
-        double scale = dpi > 0 ? dpi / DefaultDpi : 1d;
-        ApplyWindowSizeForScale(scale);
-    }
-
-    private void RootGrid_Loaded(object sender, RoutedEventArgs e)
-    {
-        XamlRoot? xamlRoot = RootGrid.XamlRoot;
-        if (xamlRoot is null)
-        {
-            return;
-        }
-
-        if (_xamlRoot != xamlRoot)
-        {
-            if (_xamlRoot is not null)
-            {
-                _xamlRoot.Changed -= XamlRoot_Changed;
-            }
-
-            _xamlRoot = xamlRoot;
-            _xamlRoot.Changed += XamlRoot_Changed;
-        }
-
-        ApplyWindowSizeForScale(xamlRoot.RasterizationScale);
-    }
-
-    private void XamlRoot_Changed(XamlRoot sender, XamlRootChangedEventArgs args)
-    {
-        ApplyWindowSizeForScale(sender.RasterizationScale);
-    }
-
-    private void ApplyWindowSizeForScale(double scale)
-    {
-        if (scale <= 0 || Math.Abs(scale - _lastRasterizationScale) < 0.001)
-        {
-            return;
-        }
-
-        _lastRasterizationScale = scale;
-        AppWindow.Resize(new SizeInt32(
-            (int)Math.Round(WindowWidth * scale, MidpointRounding.AwayFromZero),
-            (int)Math.Round(WindowHeight * scale, MidpointRounding.AwayFromZero)));
     }
 
     private void InitializeStoredUid()
@@ -523,12 +472,6 @@ public sealed partial class MainWindow : Window
 
     private void MainWindow_Closed(object sender, WindowEventArgs args)
     {
-        if (_xamlRoot is not null)
-        {
-            _xamlRoot.Changed -= XamlRoot_Changed;
-            _xamlRoot = null;
-        }
-
         _acrylicController?.Dispose();
         _acrylicController = null;
     }
@@ -637,9 +580,6 @@ public sealed partial class MainWindow : Window
 
     [DllImport("user32.dll")]
     private static extern bool GetCursorPos(out CursorPoint lpPoint);
-
-    [DllImport("user32.dll")]
-    private static extern uint GetDpiForWindow(nint hWnd);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct CursorPoint
