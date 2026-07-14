@@ -17,6 +17,8 @@ using Microsoft.UI.Windowing;
 using Windows.Graphics;
 using Windows.UI;
 using WinRT.Interop;
+using DrawingIcon = System.Drawing.Icon;
+using WinForms = System.Windows.Forms;
 
 // To learn more about WinUI, the WinUI project structure,
 // and more about our project templates, see: http://aka.ms/winui-project-info.
@@ -33,6 +35,7 @@ public sealed partial class MainWindow : Window
     private const string LegacyHistoryFileName = "fans-history.json";
     private static readonly TimeSpan HistoryRetention = TimeSpan.FromDays(3);
     private const int GwlStyle = -16;
+    private const int GwlExStyle = -20;
     private const uint SwpNoMove = 0x0002;
     private const uint SwpNoSize = 0x0001;
     private const uint SwpNoZOrder = 0x0004;
@@ -42,6 +45,8 @@ public sealed partial class MainWindow : Window
     private const long WsMinimizeBox = 0x00020000;
     private const long WsSysMenu = 0x00080000;
     private const long WsThickFrame = 0x00040000;
+    private const long WsExToolWindow = 0x00000080;
+    private const long WsExAppWindow = 0x00040000;
 
     private static readonly HttpClient HttpClient = CreateHttpClient();
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -72,6 +77,9 @@ public sealed partial class MainWindow : Window
     private PointInt32 _dragStartCursor;
     private PointInt32 _dragStartWindow;
     private SystemBackdropConfiguration? _backdropConfiguration;
+    private DrawingIcon? _trayIconImage;
+    private WinForms.ContextMenuStrip? _trayContextMenu;
+    private WinForms.NotifyIcon? _trayIcon;
 
     public MainWindow()
     {
@@ -88,7 +96,9 @@ public sealed partial class MainWindow : Window
             presenter.IsMinimizable = false;
         }
 
+        Closed += MainWindow_Closed;
         RemoveWindowChrome();
+        InitializeTrayIcon();
         InitializeAcrylicBackdrop();
 
         _refreshTimer.Tick += RefreshTimer_Tick;
@@ -104,11 +114,79 @@ public sealed partial class MainWindow : Window
 
     private void SetWindowIcon()
     {
-        string iconPath = Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico");
+        string iconPath = GetAppIconPath();
         if (File.Exists(iconPath))
         {
             AppWindow.SetIcon(iconPath);
         }
+    }
+
+    private static string GetAppIconPath()
+    {
+        return Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico");
+    }
+
+    private void InitializeTrayIcon()
+    {
+        string iconPath = GetAppIconPath();
+        if (!File.Exists(iconPath))
+        {
+            return;
+        }
+
+        _trayIconImage = new DrawingIcon(iconPath);
+        _trayContextMenu = new WinForms.ContextMenuStrip();
+
+        var showItem = new WinForms.ToolStripMenuItem("显示窗口");
+        showItem.Click += TrayShow_Click;
+
+        var hideItem = new WinForms.ToolStripMenuItem("隐藏窗口");
+        hideItem.Click += TrayHide_Click;
+
+        var refreshItem = new WinForms.ToolStripMenuItem("立刻刷新");
+        refreshItem.Click += TrayRefresh_Click;
+
+        var exitItem = new WinForms.ToolStripMenuItem("退出");
+        exitItem.Click += TrayExit_Click;
+
+        _trayContextMenu.Items.Add(showItem);
+        _trayContextMenu.Items.Add(hideItem);
+        _trayContextMenu.Items.Add(refreshItem);
+        _trayContextMenu.Items.Add(new WinForms.ToolStripSeparator());
+        _trayContextMenu.Items.Add(exitItem);
+
+        _trayIcon = new WinForms.NotifyIcon
+        {
+            ContextMenuStrip = _trayContextMenu,
+            Icon = _trayIconImage,
+            Text = "BiliFansDisplay",
+            Visible = true
+        };
+        _trayIcon.DoubleClick += TrayShow_Click;
+    }
+
+    private void TrayShow_Click(object? sender, EventArgs e)
+    {
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            AppWindow.Show();
+            Activate();
+        });
+    }
+
+    private void TrayHide_Click(object? sender, EventArgs e)
+    {
+        DispatcherQueue.TryEnqueue(() => AppWindow.Hide());
+    }
+
+    private void TrayRefresh_Click(object? sender, EventArgs e)
+    {
+        DispatcherQueue.TryEnqueue(async () => await RefreshNowAsync());
+    }
+
+    private void TrayExit_Click(object? sender, EventArgs e)
+    {
+        DispatcherQueue.TryEnqueue(Close);
     }
 
     private void InitializeStoredUid()
@@ -203,6 +281,11 @@ public sealed partial class MainWindow : Window
     }
 
     private async void RefreshNow_Click(object sender, RoutedEventArgs e)
+    {
+        await RefreshNowAsync();
+    }
+
+    private async Task RefreshNowAsync()
     {
         _refreshTimer.Stop();
         await RefreshFansAsync();
@@ -440,7 +523,6 @@ public sealed partial class MainWindow : Window
         SetBackdropTheme();
 
         Activated += MainWindow_Activated;
-        Closed += MainWindow_Closed;
         RootGrid.ActualThemeChanged += RootGrid_ActualThemeChanged;
 
         _acrylicController = new DesktopAcrylicController { Kind = _acrylicKind };
@@ -472,6 +554,20 @@ public sealed partial class MainWindow : Window
 
     private void MainWindow_Closed(object sender, WindowEventArgs args)
     {
+        if (_trayIcon is not null)
+        {
+            _trayIcon.Visible = false;
+            _trayIcon.DoubleClick -= TrayShow_Click;
+            _trayIcon.Dispose();
+            _trayIcon = null;
+        }
+
+        _trayContextMenu?.Dispose();
+        _trayContextMenu = null;
+
+        _trayIconImage?.Dispose();
+        _trayIconImage = null;
+
         _acrylicController?.Dispose();
         _acrylicController = null;
     }
@@ -566,6 +662,13 @@ public sealed partial class MainWindow : Window
         long styleValue = style.ToInt64();
         styleValue &= ~(WsCaption | WsSysMenu | WsMinimizeBox | WsMaximizeBox | WsThickFrame);
         SetWindowLongPtr(hwnd, GwlStyle, new nint(styleValue));
+
+        nint exStyle = GetWindowLongPtr(hwnd, GwlExStyle);
+        long exStyleValue = exStyle.ToInt64();
+        exStyleValue &= ~WsExAppWindow;
+        exStyleValue |= WsExToolWindow;
+        SetWindowLongPtr(hwnd, GwlExStyle, new nint(exStyleValue));
+
         SetWindowPos(hwnd, nint.Zero, 0, 0, 0, 0, SwpNoMove | SwpNoSize | SwpNoZOrder | SwpFrameChanged);
     }
 
