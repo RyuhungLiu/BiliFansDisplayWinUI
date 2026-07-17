@@ -1,15 +1,16 @@
 # BiliFansDisplay
 
-一个简单的 WinUI 3 桌面小工具，用来显示指定 B 站 UID 的粉丝数。
+一个简单的 WinUI 3 桌面小工具，用来显示 Bilibili 粉丝数和 YouTube 频道订阅数。
 
 ## 功能
 
-- 首次启动输入 UID 并确认，之后应用内不再提供修改入口。
+- 通过 `settings.ini` 配置 Bilibili 空间链接和 YouTube 频道链接。
 - 每 3 分钟刷新一次粉丝数，并记录时间戳。
 - 显示最近 1h、3h、24h 的滚动粉丝变化。
+- Bilibili 和 YouTube 可以同时显示为两个独立窗口。
 - 右键窗口可以立刻刷新，也可以切换亚克力背景风格。
-- 常驻系统托盘，不占用任务栏；托盘菜单可以显示、隐藏、刷新或退出程序。
-- 每个 UID 使用独立日志文件，并自动迁移旧版日志。
+- 常驻系统托盘，不占用任务栏；托盘菜单可以显示、隐藏、刷新、打开配置或退出程序。
+- 每个跟踪链接使用独立日志文件，并自动迁移旧版 Bilibili 日志。
 - 启动时清理 3 天以前的历史记录。
 
 ## 本地数据
@@ -23,11 +24,32 @@
 主要文件：
 
 ```text
-config.json
+settings.ini
+config.json（旧版 UID 迁移来源）
 history\<uid>.json
+history\youtube-<hash>.json
 ```
 
 旧版 `fans-history.json` 会在 UID 配置完成后迁移到对应的 `history\<uid>.json`。
+
+`settings.ini` 示例：
+
+```ini
+[Bilibili]
+Url=https://space.bilibili.com/23940738
+
+[YouTube]
+Url=https://www.youtube.com/@YouTube
+```
+
+支持的 YouTube 链接格式包括：
+
+```text
+https://www.youtube.com/@handle
+https://www.youtube.com/channel/UC...
+https://www.youtube.com/c/name
+https://www.youtube.com/user/name
+```
 
 ## 构建
 

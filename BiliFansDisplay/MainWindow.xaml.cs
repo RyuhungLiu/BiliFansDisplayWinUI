@@ -1,11 +1,15 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Microsoft.UI.Composition;
 using Microsoft.UI.Composition.SystemBackdrops;
@@ -20,15 +24,14 @@ using WinRT.Interop;
 using DrawingIcon = System.Drawing.Icon;
 using WinForms = System.Windows.Forms;
 
-// To learn more about WinUI, the WinUI project structure,
-// and more about our project templates, see: http://aka.ms/winui-project-info.
-
 namespace BiliFansDisplay;
 
 public sealed partial class MainWindow : Window
 {
-    private const int WindowWidth = 460;
-    private const int WindowHeight = 240;
+    private const int WindowWidthAtReferenceDpi = 460;
+    private const int WindowHeightAtReferenceDpi = 240;
+    private const double ReferenceDpiScale = 1.5d;
+    private const double DefaultDpi = 96d;
     private const string AppDataFolderName = "BiliFansDisplay";
     private const string ConfigFileName = "config.json";
     private const string HistoryFolderName = "history";
@@ -48,6 +51,10 @@ public sealed partial class MainWindow : Window
     private const long WsExToolWindow = 0x00000080;
     private const long WsExAppWindow = 0x00040000;
 
+    private static readonly Regex YouTubeSubscriberRegex = new(
+        @"(?<value>\d[\d,]*(?:\.\d+)?)\s*(?<suffix>K|M|B|thousand|million|billion)?[\s\u200E\u2068\u2069]*subscribers",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+
     private static readonly HttpClient HttpClient = CreateHttpClient();
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -66,27 +73,49 @@ public sealed partial class MainWindow : Window
     private static string LegacyHistoryPath => Path.Combine(AppDataDirectory, LegacyHistoryFileName);
 
     private readonly DispatcherTimer _refreshTimer = new() { Interval = TimeSpan.FromMinutes(3) };
+    private readonly CounterSource _source;
+    private readonly bool _ownsTray;
 
     private List<FanRecord> _history = [];
+    private AppSettings? _settings;
     private DesktopAcrylicController? _acrylicController;
     private DesktopAcrylicKind _acrylicKind = DesktopAcrylicKind.Default;
     private bool _isDragging;
     private bool _isRefreshing;
+    private bool _isClosing;
+    private bool _secondaryWindowInitialized;
+    private double _lastRasterizationScale;
+    private int _sourceGeneration;
     private long? _uid;
     private string? _historyPath;
+    private string? _sourceUrl;
+    private MainWindow? _youtubeWindow;
     private PointInt32 _dragStartCursor;
     private PointInt32 _dragStartWindow;
     private SystemBackdropConfiguration? _backdropConfiguration;
+    private XamlRoot? _xamlRoot;
     private DrawingIcon? _trayIconImage;
     private WinForms.ContextMenuStrip? _trayContextMenu;
     private WinForms.NotifyIcon? _trayIcon;
+    private WinForms.ToolStripMenuItem? _showYouTubeItem;
 
     public MainWindow()
+        : this(CounterSource.Bilibili, null, true)
     {
+    }
+
+    private MainWindow(CounterSource source, string? sourceUrl, bool ownsTray)
+    {
+        _source = source;
+        _sourceUrl = sourceUrl;
+        _ownsTray = ownsTray;
+
         InitializeComponent();
 
+        Title = source == CounterSource.Bilibili ? "BiliFansDisplay" : "YouTube Fans Display";
+        SourceNameItem.Text = source == CounterSource.Bilibili ? "Bilibili" : "YouTube";
         SetWindowIcon();
-        AppWindow.Resize(new SizeInt32(WindowWidth, WindowHeight));
+        ApplyInitialWindowSize();
 
         if (AppWindow.Presenter is OverlappedPresenter presenter)
         {
@@ -96,19 +125,34 @@ public sealed partial class MainWindow : Window
             presenter.IsMinimizable = false;
         }
 
+        Activated += MainWindow_Activated;
         Closed += MainWindow_Closed;
         RemoveWindowChrome();
-        InitializeTrayIcon();
-        InitializeAcrylicBackdrop();
 
+        if (_ownsTray)
+        {
+            InitializeTrayIcon();
+        }
+
+        InitializeAcrylicBackdrop();
         _refreshTimer.Tick += RefreshTimer_Tick;
-        InitializeStoredUid();
+
+        if (_source == CounterSource.Bilibili)
+        {
+            InitializeSettings();
+        }
+        else if (AppSettings.NormalizeYouTubeUrl(sourceUrl ?? string.Empty) is string normalizedUrl)
+        {
+            InitializeYouTubeSource(normalizedUrl);
+        }
     }
 
     private static HttpClient CreateHttpClient()
     {
         var httpClient = new HttpClient();
-        httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 BiliFansDisplay/1.0");
+        httpClient.DefaultRequestHeaders.UserAgent.ParseAdd(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/136.0 Safari/537.36 BiliFansDisplay/1.0");
+        httpClient.DefaultRequestHeaders.AcceptLanguage.ParseAdd("en-US,en;q=0.9");
         return httpClient;
     }
 
@@ -126,6 +170,56 @@ public sealed partial class MainWindow : Window
         return Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico");
     }
 
+    private void ApplyInitialWindowSize()
+    {
+        nint hwnd = WindowNative.GetWindowHandle(this);
+        uint dpi = GetDpiForWindow(hwnd);
+        double scale = dpi > 0 ? dpi / DefaultDpi : ReferenceDpiScale;
+        ApplyWindowSizeForScale(scale);
+    }
+
+    private void RootGrid_Loaded(object sender, RoutedEventArgs e)
+    {
+        XamlRoot? xamlRoot = RootGrid.XamlRoot;
+        if (xamlRoot is null)
+        {
+            return;
+        }
+
+        if (_xamlRoot != xamlRoot)
+        {
+            if (_xamlRoot is not null)
+            {
+                _xamlRoot.Changed -= XamlRoot_Changed;
+            }
+
+            _xamlRoot = xamlRoot;
+            _xamlRoot.Changed += XamlRoot_Changed;
+        }
+
+        ApplyWindowSizeForScale(xamlRoot.RasterizationScale);
+    }
+
+    private void XamlRoot_Changed(XamlRoot sender, XamlRootChangedEventArgs args)
+    {
+        ApplyWindowSizeForScale(sender.RasterizationScale);
+    }
+
+    private void ApplyWindowSizeForScale(double scale)
+    {
+        if (scale <= 0 || Math.Abs(scale - _lastRasterizationScale) < 0.001)
+        {
+            return;
+        }
+
+        _lastRasterizationScale = scale;
+        double logicalWidth = WindowWidthAtReferenceDpi / ReferenceDpiScale;
+        double logicalHeight = WindowHeightAtReferenceDpi / ReferenceDpiScale;
+        AppWindow.Resize(new SizeInt32(
+            (int)Math.Round(logicalWidth * scale, MidpointRounding.AwayFromZero),
+            (int)Math.Round(logicalHeight * scale, MidpointRounding.AwayFromZero)));
+    }
+
     private void InitializeTrayIcon()
     {
         string iconPath = GetAppIconPath();
@@ -137,21 +231,34 @@ public sealed partial class MainWindow : Window
         _trayIconImage = new DrawingIcon(iconPath);
         _trayContextMenu = new WinForms.ContextMenuStrip();
 
-        var showItem = new WinForms.ToolStripMenuItem("显示窗口");
-        showItem.Click += TrayShow_Click;
+        var showBilibiliItem = new WinForms.ToolStripMenuItem("显示 Bilibili 窗口");
+        showBilibiliItem.Click += TrayShowBilibili_Click;
 
-        var hideItem = new WinForms.ToolStripMenuItem("隐藏窗口");
-        hideItem.Click += TrayHide_Click;
+        _showYouTubeItem = new WinForms.ToolStripMenuItem("显示 YouTube 窗口") { Enabled = false };
+        _showYouTubeItem.Click += TrayShowYouTube_Click;
 
-        var refreshItem = new WinForms.ToolStripMenuItem("立刻刷新");
+        var hideItem = new WinForms.ToolStripMenuItem("隐藏全部窗口");
+        hideItem.Click += TrayHideAll_Click;
+
+        var refreshItem = new WinForms.ToolStripMenuItem("立刻刷新全部");
         refreshItem.Click += TrayRefresh_Click;
+
+        var openSettingsItem = new WinForms.ToolStripMenuItem("打开 settings.ini");
+        openSettingsItem.Click += TrayOpenSettings_Click;
+
+        var reloadSettingsItem = new WinForms.ToolStripMenuItem("重新加载配置");
+        reloadSettingsItem.Click += TrayReloadSettings_Click;
 
         var exitItem = new WinForms.ToolStripMenuItem("退出");
         exitItem.Click += TrayExit_Click;
 
-        _trayContextMenu.Items.Add(showItem);
+        _trayContextMenu.Items.Add(showBilibiliItem);
+        _trayContextMenu.Items.Add(_showYouTubeItem);
         _trayContextMenu.Items.Add(hideItem);
         _trayContextMenu.Items.Add(refreshItem);
+        _trayContextMenu.Items.Add(new WinForms.ToolStripSeparator());
+        _trayContextMenu.Items.Add(openSettingsItem);
+        _trayContextMenu.Items.Add(reloadSettingsItem);
         _trayContextMenu.Items.Add(new WinForms.ToolStripSeparator());
         _trayContextMenu.Items.Add(exitItem);
 
@@ -162,26 +269,56 @@ public sealed partial class MainWindow : Window
             Text = "BiliFansDisplay",
             Visible = true
         };
-        _trayIcon.DoubleClick += TrayShow_Click;
+        _trayIcon.DoubleClick += TrayShowBilibili_Click;
     }
 
-    private void TrayShow_Click(object? sender, EventArgs e)
+    private void TrayShowBilibili_Click(object? sender, EventArgs e)
+    {
+        DispatcherQueue.TryEnqueue(ShowWindow);
+    }
+
+    private void TrayShowYouTube_Click(object? sender, EventArgs e)
     {
         DispatcherQueue.TryEnqueue(() =>
         {
-            AppWindow.Show();
-            Activate();
+            EnsureYouTubeWindow();
+            _youtubeWindow?.ShowWindow();
         });
     }
 
-    private void TrayHide_Click(object? sender, EventArgs e)
+    private void TrayHideAll_Click(object? sender, EventArgs e)
     {
-        DispatcherQueue.TryEnqueue(() => AppWindow.Hide());
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            AppWindow.Hide();
+            _youtubeWindow?.AppWindow.Hide();
+        });
     }
 
     private void TrayRefresh_Click(object? sender, EventArgs e)
     {
-        DispatcherQueue.TryEnqueue(async () => await RefreshNowAsync());
+        DispatcherQueue.TryEnqueue(async () =>
+        {
+            await RefreshNowAsync();
+            if (_youtubeWindow is not null)
+            {
+                await _youtubeWindow.RefreshNowAsync();
+            }
+        });
+    }
+
+    private void TrayOpenSettings_Click(object? sender, EventArgs e)
+    {
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            _settings ??= AppSettings.LoadOrCreate(LoadConfiguredUid());
+            Process.Start(new ProcessStartInfo(AppSettings.SettingsPath) { UseShellExecute = true });
+        });
+    }
+
+    private void TrayReloadSettings_Click(object? sender, EventArgs e)
+    {
+        DispatcherQueue.TryEnqueue(async () => await ReloadSettingsAsync());
     }
 
     private void TrayExit_Click(object? sender, EventArgs e)
@@ -189,21 +326,153 @@ public sealed partial class MainWindow : Window
         DispatcherQueue.TryEnqueue(Close);
     }
 
-    private void InitializeStoredUid()
+    private void ShowWindow()
     {
-        long? storedUid = LoadConfiguredUid();
+        AppWindow.Show();
+        Activate();
+    }
 
-        if (storedUid is null)
+    private void InitializeSettings()
+    {
+        long? legacyUid = LoadConfiguredUid();
+        _settings = AppSettings.LoadOrCreate(legacyUid);
+
+        if (AppSettings.TryGetBilibiliUid(_settings.BilibiliUrl, out long uid))
+        {
+            InitializeUid(uid);
+        }
+        else
         {
             ShowSetupView();
+        }
+
+        UpdateYouTubeTrayState();
+    }
+
+    private async Task ReloadSettingsAsync()
+    {
+        if (!_ownsTray)
+        {
             return;
         }
 
-        InitializeUid(storedUid.Value);
+        _settings = AppSettings.LoadOrCreate(LoadConfiguredUid());
+        if (AppSettings.TryGetBilibiliUid(_settings.BilibiliUrl, out long uid))
+        {
+            if (_uid != uid || SetupView.Visibility == Visibility.Visible)
+            {
+                InitializeUid(uid);
+            }
+            else
+            {
+                await RefreshNowAsync();
+            }
+        }
+        else
+        {
+            ShowSetupView();
+        }
+
+        EnsureYouTubeWindow();
+        if (_youtubeWindow is not null)
+        {
+            await _youtubeWindow.RefreshNowAsync();
+        }
+    }
+
+    private void EnsureYouTubeWindow()
+    {
+        if (!_ownsTray)
+        {
+            return;
+        }
+
+        string? normalizedUrl = AppSettings.NormalizeYouTubeUrl(_settings?.YouTubeUrl ?? string.Empty);
+        if (_showYouTubeItem is not null)
+        {
+            _showYouTubeItem.Enabled = normalizedUrl is not null;
+        }
+
+        if (normalizedUrl is null)
+        {
+            CloseYouTubeWindow();
+            return;
+        }
+
+        if (_youtubeWindow is not null
+            && string.Equals(_youtubeWindow._sourceUrl, normalizedUrl, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        CloseYouTubeWindow();
+        _youtubeWindow = new MainWindow(CounterSource.YouTube, normalizedUrl, false);
+        _youtubeWindow.Closed += YouTubeWindow_Closed;
+        _youtubeWindow.Activate();
+        DispatcherQueue.TryEnqueue(PositionYouTubeWindow);
+    }
+
+    private void UpdateYouTubeTrayState()
+    {
+        if (_showYouTubeItem is not null)
+        {
+            _showYouTubeItem.Enabled = AppSettings.NormalizeYouTubeUrl(_settings?.YouTubeUrl ?? string.Empty) is not null;
+        }
+    }
+
+    private void PositionYouTubeWindow()
+    {
+        if (_youtubeWindow is null)
+        {
+            return;
+        }
+
+        const int gap = 12;
+        PointInt32 primaryPosition = AppWindow.Position;
+        SizeInt32 primarySize = AppWindow.Size;
+        SizeInt32 youtubeSize = _youtubeWindow.AppWindow.Size;
+        int x = primaryPosition.X + primarySize.Width + gap;
+        int y = primaryPosition.Y;
+
+        DisplayArea displayArea = DisplayArea.GetFromWindowId(AppWindow.Id, DisplayAreaFallback.Nearest);
+        RectInt32 workArea = displayArea.WorkArea;
+        if (x + youtubeSize.Width > workArea.X + workArea.Width)
+        {
+            x = primaryPosition.X - youtubeSize.Width - gap;
+        }
+
+        x = Math.Clamp(x, workArea.X, workArea.X + Math.Max(0, workArea.Width - youtubeSize.Width));
+        y = Math.Clamp(y, workArea.Y, workArea.Y + Math.Max(0, workArea.Height - youtubeSize.Height));
+        _youtubeWindow.AppWindow.Move(new PointInt32(x, y));
+    }
+
+    private void YouTubeWindow_Closed(object sender, WindowEventArgs args)
+    {
+        if (sender is MainWindow window)
+        {
+            window.Closed -= YouTubeWindow_Closed;
+        }
+
+        _youtubeWindow = null;
+        UpdateYouTubeTrayState();
+    }
+
+    private void CloseYouTubeWindow()
+    {
+        MainWindow? window = _youtubeWindow;
+        if (window is null)
+        {
+            return;
+        }
+
+        _youtubeWindow = null;
+        window.Closed -= YouTubeWindow_Closed;
+        window.Close();
     }
 
     private void ShowSetupView()
     {
+        _sourceGeneration++;
         _refreshTimer.Stop();
         _uid = null;
         _historyPath = null;
@@ -223,14 +492,28 @@ public sealed partial class MainWindow : Window
 
     private void InitializeUid(long uid)
     {
+        _sourceGeneration++;
+        _refreshTimer.Stop();
         _uid = uid;
-        _historyPath = GetHistoryPath(uid);
-
+        _sourceUrl = $"https://space.bilibili.com/{uid.ToString(CultureInfo.InvariantCulture)}";
+        _historyPath = GetBilibiliHistoryPath(uid);
         MigrateLegacyHistory(uid);
-        _history = LoadHistoryFromPath(_historyPath);
+        InitializeHistoryAndRefresh();
+    }
 
-        bool removedExpiredRecords = RemoveExpiredHistory();
-        if (removedExpiredRecords)
+    private void InitializeYouTubeSource(string sourceUrl)
+    {
+        _sourceGeneration++;
+        _refreshTimer.Stop();
+        _sourceUrl = sourceUrl;
+        _historyPath = GetYouTubeHistoryPath(sourceUrl);
+        InitializeHistoryAndRefresh();
+    }
+
+    private void InitializeHistoryAndRefresh()
+    {
+        _history = _historyPath is null ? [] : LoadHistoryFromPath(_historyPath);
+        if (RemoveExpiredHistory())
         {
             SaveHistory();
         }
@@ -240,6 +523,13 @@ public sealed partial class MainWindow : Window
         if (latestRecord is not null)
         {
             UpdateDisplay(latestRecord.Follower, latestRecord.Timestamp);
+        }
+        else
+        {
+            FansText.Text = "--";
+            UpdateDeltaText(OneHourText, "1h", new DeltaResult(false, 0), true);
+            ThreeHourText.Visibility = Visibility.Collapsed;
+            DayText.Visibility = Visibility.Collapsed;
         }
 
         StartRefreshLoop();
@@ -267,9 +557,12 @@ public sealed partial class MainWindow : Window
         try
         {
             SaveConfig(uid);
+            _settings ??= AppSettings.LoadOrCreate(uid);
+            _settings.BilibiliUrl = $"https://space.bilibili.com/{uid.ToString(CultureInfo.InvariantCulture)}";
+            _settings.Save();
             InitializeUid(uid);
         }
-        catch (Exception)
+        catch
         {
             SetupErrorText.Text = "保存 UID 失败";
         }
@@ -290,11 +583,18 @@ public sealed partial class MainWindow : Window
         _refreshTimer.Stop();
         await RefreshFansAsync();
 
-        if (_uid is not null)
+        if (IsSourceConfigured && !_isClosing)
         {
             _refreshTimer.Start();
         }
     }
+
+    private bool IsSourceConfigured => _source switch
+    {
+        CounterSource.Bilibili => _uid is not null,
+        CounterSource.YouTube => !string.IsNullOrWhiteSpace(_sourceUrl),
+        _ => false
+    };
 
     private void AcrylicDefault_Click(object sender, RoutedEventArgs e)
     {
@@ -313,42 +613,253 @@ public sealed partial class MainWindow : Window
 
     private async Task RefreshFansAsync()
     {
-        if (_isRefreshing || _uid is null)
+        if (_isRefreshing || _isClosing || !IsSourceConfigured)
         {
             return;
         }
 
         _isRefreshing = true;
-        long uid = _uid.Value;
+        int generation = _sourceGeneration;
 
         try
         {
-            string requestUri = $"https://api.bilibili.com/x/relation/stat?vmid={uid.ToString(CultureInfo.InvariantCulture)}";
-            using HttpResponseMessage response = await HttpClient.GetAsync(requestUri);
-            response.EnsureSuccessStatusCode();
-
-            await using var stream = await response.Content.ReadAsStreamAsync();
-            using JsonDocument document = await JsonDocument.ParseAsync(stream);
-            JsonElement root = document.RootElement;
-
-            if (root.GetProperty("code").GetInt32() == 0)
+            long? follower = _source switch
             {
-                long follower = root.GetProperty("data").GetProperty("follower").GetInt64();
-                DateTimeOffset timestamp = DateTimeOffset.UtcNow;
+                CounterSource.Bilibili when _uid is long uid => await FetchBilibiliFollowerAsync(uid),
+                CounterSource.YouTube when _sourceUrl is string url => await FetchYouTubeFollowerAsync(url),
+                _ => null
+            };
 
-                _history.Add(new FanRecord(timestamp, follower));
-                RemoveExpiredHistory();
-                SaveHistory();
-                UpdateDisplay(follower, timestamp);
+            if (follower is null || generation != _sourceGeneration || _isClosing)
+            {
+                return;
             }
+
+            DateTimeOffset timestamp = DateTimeOffset.UtcNow;
+            _history.Add(new FanRecord(timestamp, follower.Value));
+            RemoveExpiredHistory();
+            SaveHistory();
+            UpdateDisplay(follower.Value, timestamp);
         }
-        catch (Exception)
+        catch
         {
         }
         finally
         {
             _isRefreshing = false;
         }
+    }
+
+    private static async Task<long?> FetchBilibiliFollowerAsync(long uid)
+    {
+        string requestUri = $"https://api.bilibili.com/x/relation/stat?vmid={uid.ToString(CultureInfo.InvariantCulture)}";
+        using HttpResponseMessage response = await HttpClient.GetAsync(requestUri);
+        response.EnsureSuccessStatusCode();
+
+        await using Stream stream = await response.Content.ReadAsStreamAsync();
+        using JsonDocument document = await JsonDocument.ParseAsync(stream);
+        JsonElement root = document.RootElement;
+        return root.GetProperty("code").GetInt32() == 0
+            ? root.GetProperty("data").GetProperty("follower").GetInt64()
+            : null;
+    }
+
+    private static async Task<long?> FetchYouTubeFollowerAsync(string channelUrl)
+    {
+        string separator = channelUrl.Contains('?') ? "&" : "?";
+        string html = await HttpClient.GetStringAsync($"{channelUrl}{separator}hl=en&persist_hl=1");
+
+        foreach (string marker in new[] { "var ytInitialData = ", "ytInitialData = " })
+        {
+            string? json = ExtractJsonObject(html, marker);
+            if (json is null)
+            {
+                continue;
+            }
+
+            try
+            {
+                using JsonDocument document = JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = 256 });
+                if (TryFindSubscriberCountInPageHeader(document.RootElement, out long count)
+                    || TryFindSubscriberCountInElement(document.RootElement, out count))
+                {
+                    return count;
+                }
+            }
+            catch (JsonException)
+            {
+            }
+        }
+
+        return TryParseSubscriberCount(html, out long fallbackCount) ? fallbackCount : null;
+    }
+
+    private static string? ExtractJsonObject(string html, string marker)
+    {
+        int markerIndex = html.IndexOf(marker, StringComparison.Ordinal);
+        if (markerIndex < 0)
+        {
+            return null;
+        }
+
+        int start = markerIndex + marker.Length;
+        while (start < html.Length && char.IsWhiteSpace(html[start]))
+        {
+            start++;
+        }
+
+        if (start >= html.Length || html[start] != '{')
+        {
+            return null;
+        }
+
+        int depth = 0;
+        bool inString = false;
+        bool escaped = false;
+
+        for (int index = start; index < html.Length; index++)
+        {
+            char character = html[index];
+            if (inString)
+            {
+                if (escaped)
+                {
+                    escaped = false;
+                }
+                else if (character == '\\')
+                {
+                    escaped = true;
+                }
+                else if (character == '"')
+                {
+                    inString = false;
+                }
+
+                continue;
+            }
+
+            if (character == '"')
+            {
+                inString = true;
+            }
+            else if (character == '{')
+            {
+                depth++;
+            }
+            else if (character == '}' && --depth == 0)
+            {
+                return html[start..(index + 1)];
+            }
+        }
+
+        return null;
+    }
+
+    private static bool TryFindSubscriberCountInPageHeader(JsonElement element, out long count)
+    {
+        count = 0;
+        switch (element.ValueKind)
+        {
+            case JsonValueKind.Object:
+                foreach (JsonProperty property in element.EnumerateObject())
+                {
+                    if ((property.NameEquals("pageHeaderRenderer") || property.NameEquals("pageHeaderViewModel"))
+                        && TryFindSubscriberCountInElement(property.Value, out count))
+                    {
+                        return true;
+                    }
+                }
+
+                foreach (JsonProperty property in element.EnumerateObject())
+                {
+                    if (TryFindSubscriberCountInPageHeader(property.Value, out count))
+                    {
+                        return true;
+                    }
+                }
+
+                break;
+
+            case JsonValueKind.Array:
+                foreach (JsonElement item in element.EnumerateArray())
+                {
+                    if (TryFindSubscriberCountInPageHeader(item, out count))
+                    {
+                        return true;
+                    }
+                }
+
+                break;
+        }
+
+        return false;
+    }
+
+    private static bool TryFindSubscriberCountInElement(JsonElement element, out long count)
+    {
+        count = 0;
+        switch (element.ValueKind)
+        {
+            case JsonValueKind.String:
+                return TryParseSubscriberCount(element.GetString() ?? string.Empty, out count);
+
+            case JsonValueKind.Object:
+                foreach (JsonProperty property in element.EnumerateObject())
+                {
+                    if (TryFindSubscriberCountInElement(property.Value, out count))
+                    {
+                        return true;
+                    }
+                }
+
+                break;
+
+            case JsonValueKind.Array:
+                foreach (JsonElement item in element.EnumerateArray())
+                {
+                    if (TryFindSubscriberCountInElement(item, out count))
+                    {
+                        return true;
+                    }
+                }
+
+                break;
+        }
+
+        return false;
+    }
+
+    private static bool TryParseSubscriberCount(string text, out long count)
+    {
+        count = 0;
+        Match match = YouTubeSubscriberRegex.Match(text);
+        if (!match.Success)
+        {
+            return false;
+        }
+
+        string numberText = match.Groups["value"].Value.Replace(",", string.Empty, StringComparison.Ordinal);
+        if (!decimal.TryParse(numberText, NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out decimal value))
+        {
+            return false;
+        }
+
+        decimal multiplier = match.Groups["suffix"].Value.ToLowerInvariant() switch
+        {
+            "k" or "thousand" => 1_000m,
+            "m" or "million" => 1_000_000m,
+            "b" or "billion" => 1_000_000_000m,
+            _ => 1m
+        };
+
+        decimal rounded = Math.Round(value * multiplier, 0, MidpointRounding.AwayFromZero);
+        if (rounded < 0 || rounded > long.MaxValue)
+        {
+            return false;
+        }
+
+        count = (long)rounded;
+        return true;
     }
 
     private void UpdateDisplay(long follower, DateTimeOffset timestamp)
@@ -425,9 +936,16 @@ public sealed partial class MainWindow : Window
         File.WriteAllText(ConfigPath, JsonSerializer.Serialize(config, JsonOptions));
     }
 
-    private static string GetHistoryPath(long uid)
+    private static string GetBilibiliHistoryPath(long uid)
     {
         return Path.Combine(HistoryDirectory, $"{uid.ToString(CultureInfo.InvariantCulture)}.json");
+    }
+
+    private static string GetYouTubeHistoryPath(string sourceUrl)
+    {
+        byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(sourceUrl.ToLowerInvariant()));
+        string key = Convert.ToHexString(hash.AsSpan(0, 8)).ToLowerInvariant();
+        return Path.Combine(HistoryDirectory, $"youtube-{key}.json");
     }
 
     private void MigrateLegacyHistory(long uid)
@@ -439,7 +957,7 @@ public sealed partial class MainWindow : Window
 
         try
         {
-            string targetPath = GetHistoryPath(uid);
+            string targetPath = GetBilibiliHistoryPath(uid);
             List<FanRecord> currentRecords = LoadHistoryFromPath(targetPath);
             List<FanRecord> legacyRecords = LoadHistoryFromPath(LegacyHistoryPath);
             List<FanRecord> mergedRecords = currentRecords
@@ -506,7 +1024,7 @@ public sealed partial class MainWindow : Window
 
     private static Brush GetThemeBrush(string resourceKey, Color fallbackColor)
     {
-        return Application.Current.Resources.TryGetValue(resourceKey, out object value) && value is Brush brush
+        return Microsoft.UI.Xaml.Application.Current.Resources.TryGetValue(resourceKey, out object value) && value is Brush brush
             ? brush
             : new SolidColorBrush(fallbackColor);
     }
@@ -521,8 +1039,6 @@ public sealed partial class MainWindow : Window
 
         _backdropConfiguration = new SystemBackdropConfiguration { IsInputActive = true };
         SetBackdropTheme();
-
-        Activated += MainWindow_Activated;
         RootGrid.ActualThemeChanged += RootGrid_ActualThemeChanged;
 
         _acrylicController = new DesktopAcrylicController { Kind = _acrylicKind };
@@ -550,24 +1066,50 @@ public sealed partial class MainWindow : Window
         {
             _backdropConfiguration.IsInputActive = args.WindowActivationState != WindowActivationState.Deactivated;
         }
+
+        if (_ownsTray
+            && !_secondaryWindowInitialized
+            && args.WindowActivationState != WindowActivationState.Deactivated)
+        {
+            _secondaryWindowInitialized = true;
+            DispatcherQueue.TryEnqueue(EnsureYouTubeWindow);
+        }
     }
 
     private void MainWindow_Closed(object sender, WindowEventArgs args)
     {
+        _isClosing = true;
+        _sourceGeneration++;
+        _refreshTimer.Stop();
+        _refreshTimer.Tick -= RefreshTimer_Tick;
+
+        if (_xamlRoot is not null)
+        {
+            _xamlRoot.Changed -= XamlRoot_Changed;
+            _xamlRoot = null;
+        }
+
+        if (_ownsTray)
+        {
+            CloseYouTubeWindow();
+        }
+
         if (_trayIcon is not null)
         {
             _trayIcon.Visible = false;
-            _trayIcon.DoubleClick -= TrayShow_Click;
+            _trayIcon.DoubleClick -= TrayShowBilibili_Click;
             _trayIcon.Dispose();
             _trayIcon = null;
         }
 
         _trayContextMenu?.Dispose();
         _trayContextMenu = null;
+        _showYouTubeItem = null;
 
         _trayIconImage?.Dispose();
         _trayIconImage = null;
 
+        RootGrid.ActualThemeChanged -= RootGrid_ActualThemeChanged;
         _acrylicController?.Dispose();
         _acrylicController = null;
     }
@@ -684,11 +1226,20 @@ public sealed partial class MainWindow : Window
     [DllImport("user32.dll")]
     private static extern bool GetCursorPos(out CursorPoint lpPoint);
 
+    [DllImport("user32.dll")]
+    private static extern uint GetDpiForWindow(nint hWnd);
+
     [StructLayout(LayoutKind.Sequential)]
     private struct CursorPoint
     {
         public int X;
         public int Y;
+    }
+
+    private enum CounterSource
+    {
+        Bilibili,
+        YouTube
     }
 
     private sealed record AppConfig

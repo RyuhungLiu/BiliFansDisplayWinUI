@@ -10,12 +10,18 @@
     <Grid
         x:Name="RootGrid"
         Background="Transparent"
+        Loaded="RootGrid_Loaded"
         PointerCanceled="RootGrid_PointerReleased"
         PointerMoved="RootGrid_PointerMoved"
         PointerPressed="RootGrid_PointerPressed"
         PointerReleased="RootGrid_PointerReleased">
         <Grid.ContextFlyout>
             <MenuFlyout>
+                <MenuFlyoutItem
+                    x:Name="SourceNameItem"
+                    IsEnabled="False"
+                    Text="Bilibili" />
+                <MenuFlyoutSeparator />
                 <MenuFlyoutItem Click="RefreshNow_Click" Text="立刻刷新" />
                 <MenuFlyoutSeparator />
                 <MenuFlyoutSubItem Text="亚克力风格">
